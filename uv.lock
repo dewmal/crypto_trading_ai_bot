@@ -1608,6 +1608,15 @@ wheels = [
 ]
 
 [[package]]
+name = "talipp"
+version = "2.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/8a/f4caad186285e278623a757453c5f7f2d1753f7a4947d57e5ed013a6d944/talipp-2.7.0.tar.gz", hash = "sha256:567f59ad74366cb59a14a00d350f35fd9d22e6924d6228bad581e6dcf1de2205", size = 43724, upload-time = "2025-09-09T21:10:05.496Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/aa/de1055e777e1c60f61a1ec0427a258af2e9c97d027510887133724e888d0/talipp-2.7.0-py3-none-any.whl", hash = "sha256:f749f22b9ad615605e71faf26457bb7f5e3fe16f04d3287f4ca54fd16bc3d4eb", size = 63571, upload-time = "2025-09-09T21:10:04.59Z" },
+]
+
+[[package]]
 name = "tenacity"
 version = "9.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1675,12 +1684,14 @@ source = { virtual = "." }
 dependencies = [
     { name = "pydantic-ai", extra = ["groq"] },
     { name = "python-dotenv" },
+    { name = "talipp" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pydantic-ai", extras = ["groq", "slim"], specifier = ">=2.21.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "talipp", specifier = ">=2.7.0" },
 ]
 
 [[package]]

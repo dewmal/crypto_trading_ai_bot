@@ -7,4 +7,5 @@ requires-python = ">=3.13"
 dependencies = [
     "pydantic-ai[groq,slim]>=2.21.0",
     "python-dotenv>=1.2.2",
+    "talipp>=2.7.0",
 ]
