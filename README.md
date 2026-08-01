@@ -79,8 +79,12 @@ uv run python tui.py
 ```
 
 The TUI provides dashboard, crawler, article browser, trade-analysis, and log
-views. It requires a terminal of at least 76 columns by 22 rows. On Windows,
-install `windows-curses` separately.
+views. Analysis results are presented as a visual report with a decision
+summary, trade levels, signal confidence, risk checks, and supporting evidence;
+the underlying JSON can still be saved for automation. The report opens in a
+dedicated panel, and the last result remains available while parameters are
+edited or quickly rerun. It requires a terminal of at least 76 columns by 22
+rows. On Windows, install `windows-curses` separately.
 
 ## CLI usage
 
