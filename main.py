@@ -11,6 +11,7 @@ from data import (
     NewsReport,
     RiskReview,
     TechnicalReport,
+    TradeDraft,
     TradingDeps,
     TradingResponse,
 )
@@ -154,35 +155,108 @@ trading_coordinator = Agent(
     model,
     name="trading_coordinator",
     deps_type=TradingDeps,
-    output_type=CoordinatedPlan,
+    output_type=TradeDraft,
+    retries={
+        "tools": 2,
+        "output": 3,
+    },
     instructions="""
 You coordinate trading analysis.
 
-For every instrument-specific request:
+You will receive completed and validated:
+- technical-analysis evidence;
+- market-news evidence.
 
-1. Call get_technical_analysis.
-2. Call get_market_news_analysis.
-3. Include both returned reports in CoordinatedPlan.
-4. Construct a TradeDraft using the combined evidence.
+Construct only a TradeDraft from that evidence.
 
 Return HOLD when:
-- either specialist report is missing;
 - EMA evidence is sideways, weak, contradictory, or incomplete;
 - relevant news is unavailable;
-- high-impact news materially contradicts the technical direction;
-- a proposed entry, stop, or target would require inventing a price.
+- high-impact news contradicts the technical direction;
+- an entry, stop loss, or take profit would require inventing a price;
+- the supplied evidence does not support a clearly bounded trade.
 
-News is contextual evidence. It is not a replacement for price data.
-
+Never reproduce or modify the specialist reports.
 Never claim that an order was executed.
-Never bypass risk review.
-Never invent market prices.
-
-For general educational questions, return an educational HOLD draft and set
-technical_analysis and news_analysis to null.
+Never invent prices, indicator values, headlines, or events.
 """,
 )
 
+
+async def run_technical_analysis(
+    *,
+    symbol: str,
+    timeframe: str,
+    fast_period: int,
+    slow_period: int,
+    deps: TradingDeps,
+    usage: RunUsage,
+    limits: UsageLimits,
+) -> TechnicalReport:
+    if fast_period <= 0 or slow_period <= 0:
+        raise ValueError("EMA periods must be positive.")
+
+    if fast_period >= slow_period:
+        raise ValueError(
+            "fast_period must be lower than slow_period."
+        )
+
+    result = await technical_analysis_agent.run(
+        (
+            f"Analyze {symbol} on the {timeframe} timeframe. "
+            f"Use EMA {fast_period} as the fast EMA and "
+            f"EMA {slow_period} as the slow EMA."
+        ),
+        deps=deps,
+        usage=usage,
+        usage_limits=limits,
+        retries={
+            "tools": 2,
+            "output": 3,
+        },
+    )
+
+    return result.output
+
+
+async def run_news_analysis(
+    *,
+    symbol: str,
+    keywords: list[str] | None,
+    time_filter: str,
+    limit: int,
+    deps: TradingDeps,
+    usage: RunUsage,
+    limits: UsageLimits,
+) -> NewsReport:
+    search_keywords = keywords or default_news_keywords(symbol)
+    bounded_limit = max(1, min(limit, 25))
+
+    result = await market_news_agent.run(
+        (
+            f"Analyze recent news relevant to {symbol}.\n"
+            f"Use these exact search parameters:\n"
+            f"- keywords: {search_keywords!r}\n"
+            f"- time_filter: {time_filter!r}\n"
+            f"- limit: {bounded_limit}\n"
+            f"- match_all: False\n\n"
+            "Call get_news exactly once using those parameters. "
+            "Base the report only on returned news records.\n\n"
+            "The final NewsReport must contain:\n"
+            f'- symbol: "{symbol}"\n'
+            f'- time_filter: "{time_filter}"\n'
+            f"- keywords: {search_keywords!r}"
+        ),
+        deps=deps,
+        usage=usage,
+        usage_limits=limits,
+        retries={
+            "tools": 2,
+            "output": 3,
+        },
+    )
+
+    return result.output
 
 @trading_coordinator.tool
 async def get_technical_analysis(
@@ -476,26 +550,76 @@ def apply_hard_risk_gate(
 async def create_trade_plan(
     request: str,
     deps: TradingDeps,
+    *,
+    symbol: str,
+    timeframe: str,
+    fast_period: int = 20,
+    slow_period: int = 50,
+    news_keywords: list[str] | None = None,
+    news_time_filter: str = "24h",
+    news_limit: int = 10,
 ) -> tuple[TradingResponse, RunUsage]:
     usage = RunUsage()
 
     limits = UsageLimits(
-        request_limit=16,
-        tool_calls_limit=10,
-        total_tokens_limit=16_000,
+        request_limit=20,
+        tool_calls_limit=12,
+        total_tokens_limit=20_000,
     )
 
-    # Stage 1: coordinator delegates to technical and news agents.
-    plan_result = await trading_coordinator.run(
-        request,
+    # Stage 1: Python invokes both specialist agents.
+    technical_report = await run_technical_analysis(
+        symbol=symbol,
+        timeframe=timeframe,
+        fast_period=fast_period,
+        slow_period=slow_period,
+        deps=deps,
+        usage=usage,
+        limits=limits,
+    )
+
+    news_report = await run_news_analysis(
+        symbol=symbol,
+        keywords=news_keywords,
+        time_filter=news_time_filter,
+        limit=news_limit,
+        deps=deps,
+        usage=usage,
+        limits=limits,
+    )
+
+    # Stage 2: coordinator produces only a draft.
+    coordinator_prompt = (
+        f"User request:\n{request}\n\n"
+        "Validated technical-analysis report:\n"
+        f"{technical_report.model_dump_json(indent=2)}\n\n"
+        "Validated market-news report:\n"
+        f"{news_report.model_dump_json(indent=2)}\n\n"
+        "Construct a TradeDraft using only this evidence. "
+        "Return HOLD unless the evidence clearly supports a bounded trade."
+    )
+
+    draft_result = await trading_coordinator.run(
+        coordinator_prompt,
         deps=deps,
         usage=usage,
         usage_limits=limits,
+        retries={
+            "tools": 2,
+            "output": 3,
+        },
     )
 
-    plan = plan_result.output
+    draft = draft_result.output
 
-    # Stage 2: independent review cannot be skipped by the coordinator.
+    # Python constructs the combined object. The model cannot omit fields.
+    plan = CoordinatedPlan(
+        technical_analysis=technical_report,
+        news_analysis=news_report,
+        draft=draft,
+    )
+
+    # Stage 3: independent qualitative review.
     review_result = await risk_review_agent.run(
         (
             "Review this coordinated trade plan:\n\n"
@@ -512,29 +636,32 @@ async def create_trade_plan(
         deps=deps,
         usage=usage,
         usage_limits=limits,
+        retries={
+            "tools": 1,
+            "output": 3,
+        },
     )
 
     risk_review = review_result.output
 
-    # Stage 3: deterministic application rules.
+    # Stage 4: deterministic application gate.
     hard_gate = apply_hard_risk_gate(
         plan,
         deps,
     )
 
-    executable = (
-        deps.paper_trading
-        and risk_review.approved
-        and hard_gate.approved
-    )
-
     response = TradingResponse(
-        technical_analysis=plan.technical_analysis,
-        news_analysis=plan.news_analysis,
-        draft=plan.draft,
+        technical_analysis=technical_report,
+        news_analysis=news_report,
+        draft=draft,
         risk_review=risk_review,
         hard_risk_gate=hard_gate,
-        executable=executable,
+        executable=(
+            deps.paper_trading
+            and draft.action != "hold"
+            and risk_review.approved
+            and hard_gate.approved
+        ),
     )
 
     return response, usage
@@ -554,10 +681,21 @@ async def main() -> None:
     response, usage = await create_trade_plan(
         (
             "Analyze BTCUSDT on the 1h timeframe. "
-            "Propose a trade only when both the EMA evidence "
-            "and recent news evidence are clear."
+            "Propose a trade only when the EMA and recent news "
+            "evidence are clear."
         ),
         deps,
+        symbol="BTCUSDT",
+        timeframe="1h",
+        fast_period=20,
+        slow_period=50,
+        news_keywords=[
+            "bitcoin",
+            "BTC",
+            "bitcoin ETF",
+        ],
+        news_time_filter="24h",
+        news_limit=10,
     )
 
     print(response.model_dump_json(indent=2))
