@@ -136,20 +136,3 @@ def get_binance_spot_rsi(
         period=period,
         input_values=close_prices,
     )
-
-
-ema = get_binance_spot_ema(
-    symbol="BTCUSDT",
-    interval="1m",
-    period=3,
-    limit=20,
-)
-
-rsi = get_binance_spot_rsi(
-    symbol="BTCUSDT",
-    interval="5m",
-    period=14,
-    limit=100,
-)
-print("Latest RSI:", rsi[-1])
-print("Latest EMA:", ema[-1])
