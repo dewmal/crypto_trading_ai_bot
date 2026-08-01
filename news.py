@@ -191,9 +191,3 @@ news = get_latest_news(
     limit=10,
     match_all=False,
 )
-
-for article in news:
-    print(article["published_at"])
-    print(article["title"])
-    print(article["url"])
-    print()
