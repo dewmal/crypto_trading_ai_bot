@@ -28,9 +28,10 @@ import sqlite3
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Optional
+from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
@@ -107,7 +108,7 @@ class Article:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def clean_text(value: Any) -> str:
@@ -123,8 +124,7 @@ def normalize_url(url: str, base: str = BASE_URL) -> str:
     parts = urlsplit(absolute)
     scheme = "https"
     host = (parts.hostname or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
+    host = host.removeprefix("www.")
     path = re.sub(r"/{2,}", "/", parts.path or "/")
     if path != "/" and not path.endswith("/"):
         path += "/"
@@ -183,9 +183,9 @@ def flatten_json_ld(value: Any) -> Iterator[dict[str, Any]]:
             yield from flatten_json_ld(item)
 
 
-def parse_json_ld(soup: BeautifulSoup) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
+def parse_json_ld(soup: BeautifulSoup) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     objects: list[dict[str, Any]] = []
-    article_obj: Optional[dict[str, Any]] = None
+    article_obj: dict[str, Any] | None = None
     accepted_types = {
         "article",
         "newsarticle",
@@ -235,7 +235,7 @@ def extract_image(value: Any) -> str:
     return ""
 
 
-def extract_tags(article_obj: Optional[dict[str, Any]], soup: BeautifulSoup) -> list[str]:
+def extract_tags(article_obj: dict[str, Any] | None, soup: BeautifulSoup) -> list[str]:
     tags: list[str] = []
     if article_obj:
         for value in as_list(article_obj.get("keywords")):
@@ -264,7 +264,7 @@ def link_text_length(node: Tag) -> int:
     return sum(len(clean_text(a.get_text(" ", strip=True))) for a in node.find_all("a"))
 
 
-def choose_content_root(soup: BeautifulSoup) -> Optional[Tag]:
+def choose_content_root(soup: BeautifulSoup) -> Tag | None:
     selectors = (
         "[itemprop='articleBody']",
         ".article-content",
@@ -284,7 +284,7 @@ def choose_content_root(soup: BeautifulSoup) -> Optional[Tag]:
                 seen.add(id(node))
                 candidates.append(node)
 
-    best: Optional[Tag] = None
+    best: Tag | None = None
     best_score = -1.0
     for node in candidates:
         text_len = tag_text_length(node)
@@ -301,7 +301,7 @@ def choose_content_root(soup: BeautifulSoup) -> Optional[Tag]:
     return best
 
 
-def extract_content(soup: BeautifulSoup, article_obj: Optional[dict[str, Any]]) -> str:
+def extract_content(soup: BeautifulSoup, article_obj: dict[str, Any] | None) -> str:
     if article_obj:
         structured_body = clean_text(article_obj.get("articleBody"))
         if len(structured_body) >= 250:
@@ -341,7 +341,7 @@ def extract_content(soup: BeautifulSoup, article_obj: Optional[dict[str, Any]]) 
 
 def is_article_page(
     soup: BeautifulSoup,
-    article_obj: Optional[dict[str, Any]],
+    article_obj: dict[str, Any] | None,
     title: str,
     published_at: str,
     content: str,
@@ -405,7 +405,7 @@ class CryptoNewsCrawler:
         if elapsed < self.delay:
             time.sleep(self.delay - elapsed)
 
-    def _request(self, url: str, *, check_robots: bool = True) -> Optional[requests.Response]:
+    def _request(self, url: str, *, check_robots: bool = True) -> requests.Response | None:
         url = normalize_url(url) if not url.endswith(".xml") else url
         if check_robots and self.robots and not self.robots.can_fetch(USER_AGENT, url):
             logging.warning("Blocked by robots.txt: %s", url)
@@ -421,7 +421,7 @@ class CryptoNewsCrawler:
             logging.warning("Request failed for %s: %s", url, exc)
             return None
 
-    def _load_robots(self) -> Optional[RobotFileParser]:
+    def _load_robots(self) -> RobotFileParser | None:
         robots_url = urljoin(BASE_URL, "robots.txt")
         self._polite_wait()
         try:
@@ -603,7 +603,7 @@ class CryptoNewsCrawler:
                         return ordered
         return ordered
 
-    def parse_article(self, source_url: str) -> Optional[Article]:
+    def parse_article(self, source_url: str) -> Article | None:
         response = self._request(source_url)
         if response is None:
             return None
@@ -823,7 +823,7 @@ def main() -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    crawler: Optional[CryptoNewsCrawler] = None
+    crawler: CryptoNewsCrawler | None = None
     try:
         crawler = CryptoNewsCrawler(
             db_path=args.db,
