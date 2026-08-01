@@ -82,6 +82,8 @@ class CryptoTUI:
         self.article_detail: dict[str, Any] | None = None
         self.article_detail_scroll = 0
         self.analysis_result = ""
+        self.analysis_data: dict[str, Any] | None = None
+        self.analysis_show_result = False
         self.analysis_scroll = 0
         self.crawler_selected = 0
         self.crawler_scroll = 0
@@ -223,7 +225,10 @@ class CryptoTUI:
                     self.refresh_dashboard()
                     self.refresh_articles()
                 elif task_name == "Trade analysis":
-                    self.analysis_result = json.dumps(_jsonable(result), indent=2, ensure_ascii=False)
+                    serialized = _jsonable(result)
+                    self.analysis_data = serialized
+                    self.analysis_result = json.dumps(serialized, indent=2, ensure_ascii=False)
+                    self.analysis_show_result = True
                     self.analysis_scroll = 0
             elif kind == "error":
                 task_name, message = payload
@@ -444,25 +449,149 @@ class CryptoTUI:
 
     def draw_analysis(self, y: int, x: int, height: int, width: int) -> None:
         self.draw_section_title(y, x, "Trade Analysis", width)
-        if self.analysis_result:
-            split = max(32, width // 2)
-            self.add(y + 3, x, "Parameters", self.style("title", curses.A_BOLD))
-            self.add(y + 3, x + split, "Latest result", self.style("title", curses.A_BOLD))
-            form_rows = max(1, (height - 7) // 2)
-            self.draw_form(self.analysis_fields, self.analysis_selected, y + 5, x, form_rows, split - 2)
-            lines: list[str] = []
-            for raw in self.analysis_result.splitlines():
-                lines.extend(textwrap.wrap(raw, max(20, width - split - 2), replace_whitespace=False) or [""])
-            shown = max(1, height - 6)
+        if self.analysis_show_result and self.analysis_result and self.analysis_data:
+            self.add(y + 3, x, "Latest report", self.style("title", curses.A_BOLD))
+            self.add(
+                y + 3,
+                x + max(14, width - 55),
+                "PgUp/PgDn scroll  •  r rerun  •  o save  •  Esc back",
+                self.style("muted"),
+                max_width=min(55, width),
+            )
+            lines = self.build_analysis_report(self.analysis_data, max(24, width - 1))
+            shown = max(1, height - 7)
             max_scroll = max(0, len(lines) - shown)
             self.analysis_scroll = min(self.analysis_scroll, max_scroll)
-            for index, line in enumerate(lines[self.analysis_scroll : self.analysis_scroll + shown]):
-                self.add(y + 5 + index, x + split, line, max_width=width - split)
-            self.add(y + height - 2, x + split, "PgUp/PgDn scroll • o save • x clear", self.style("muted"), max_width=width - split)
+            for index, (line, style) in enumerate(lines[self.analysis_scroll : self.analysis_scroll + shown]):
+                attr = self.style(style, curses.A_BOLD if style in {"title", "accent", "warning", "error"} else 0)
+                self.add(y + 5 + index, x, line, attr, max_width=width)
+            position = f"{self.analysis_scroll + 1}-{min(len(lines), self.analysis_scroll + shown)} of {len(lines)} lines"
+            self.add(y + height - 2, x, position, self.style("muted"), max_width=width)
         else:
-            self.add(y + 3, x, "↑/↓ select   Enter edit/run   Space toggle", self.style("muted"))
+            controls = "↑/↓ select   Enter edit/run   Space toggle"
+            if self.analysis_data:
+                controls += "   v last result   r quick rerun"
+            self.add(y + 3, x, controls, self.style("muted"), max_width=width)
             rows = max(1, (height - 7) // 2)
             self.draw_form(self.analysis_fields, self.analysis_selected, y + 5, x, rows, width)
+            if self.analysis_data:
+                draft = self.analysis_data.get("draft") or {}
+                status = "executable" if self.analysis_data.get("executable") else "not executable"
+                summary = (
+                    f"Last run: {draft.get('symbol', '—')} • "
+                    f"{draft.get('timeframe', '—')} • "
+                    f"{str(draft.get('action', 'unknown')).upper()} • {status}"
+                )
+                self.add(y + height - 2, x, summary, self.style("accent"), max_width=width)
+
+    @staticmethod
+    def build_analysis_report(data: dict[str, Any], width: int) -> list[tuple[str, str]]:
+        """Turn a structured analysis response into styled, readable rows."""
+        content_width = max(20, width)
+        lines: list[tuple[str, str]] = []
+
+        def add(text: Any = "", style: str = "") -> None:
+            wrapped = textwrap.wrap(
+                str(text),
+                content_width,
+                subsequent_indent="  ",
+                break_long_words=False,
+                break_on_hyphens=False,
+            ) or [""]
+            lines.extend((line, style) for line in wrapped)
+
+        def section(title: str) -> None:
+            if lines:
+                add()
+            add(title.upper(), "title")
+            add("─" * min(content_width, max(12, len(title) + 8)), "muted")
+
+        def bullets(items: Any, empty: str = "None reported") -> None:
+            values = items if isinstance(items, list) else []
+            if not values:
+                add(f"  • {empty}", "muted")
+            for item in values:
+                add(f"  • {item}")
+
+        def price(value: Any) -> str:
+            if value is None:
+                return "—"
+            try:
+                number = float(value)
+                return f"{number:,.8f}".rstrip("0").rstrip(".")
+            except (TypeError, ValueError):
+                return str(value)
+
+        draft = data.get("draft") or {}
+        technical = data.get("technical_analysis") or {}
+        news = data.get("news_analysis") or {}
+        review = data.get("risk_review") or {}
+        gate = data.get("hard_risk_gate") or {}
+        action = str(draft.get("action", "unknown")).upper()
+        executable = bool(data.get("executable"))
+        decision_style = "accent" if executable else "warning"
+        status = "EXECUTABLE (paper trade)" if executable else "NOT EXECUTABLE"
+
+        add(f"{draft.get('symbol', '—')}  •  {draft.get('timeframe', '—')}  •  {action}", decision_style)
+        add(f"Decision: {status}", decision_style)
+
+        section("Trade setup")
+        entry = draft.get("entry")
+        stop = draft.get("stop_loss")
+        target = draft.get("take_profit")
+        add(f"ENTRY  {price(entry)}    STOP  {price(stop)}    TARGET  {price(target)}", "accent")
+        rr: float | None = None
+        try:
+            risk_distance = abs(float(entry) - float(stop))
+            if risk_distance:
+                rr = abs(float(target) - float(entry)) / risk_distance
+        except (TypeError, ValueError):
+            pass
+        rr_text = f"{rr:.2f}:1" if rr is not None else "—"
+        add(f"Risk per trade  {float(draft.get('risk_per_trade_pct', 0)):.2f}%    Reward / risk  {rr_text}")
+
+        section("Signal snapshot")
+        trend = str(technical.get("trend", "unknown")).upper()
+        sentiment = str(news.get("sentiment", "unknown")).upper()
+        impact = str(news.get("expected_impact", "unknown")).upper()
+        confidence = max(0.0, min(1.0, float(news.get("confidence", 0) or 0)))
+        filled = round(confidence * 10)
+        meter = "█" * filled + "░" * (10 - filled)
+        add(f"EMA trend       {trend}    Fast {price(technical.get('fast_ema'))}  /  Slow {price(technical.get('slow_ema'))}")
+        add(f"News sentiment  {sentiment}    Impact {impact}    Articles {news.get('article_count', 0)}")
+        add(f"News confidence [{meter}] {confidence:.0%}", "accent" if confidence >= 0.5 else "warning")
+
+        section("Why this decision")
+        bullets(draft.get("rationale"), "No rationale supplied")
+
+        section("Risk checks")
+        add(f"Qualitative review  {'PASS' if review.get('approved') else 'FAIL'}", "accent" if review.get("approved") else "error")
+        bullets(review.get("concerns"), "No reviewer concerns")
+        add(f"Deterministic gate  {'PASS' if gate.get('approved') else 'FAIL'}", "accent" if gate.get("approved") else "error")
+        bullets(gate.get("reasons"), "No gate reasons supplied")
+        if review.get("recommended_changes"):
+            add("Recommended changes", "warning")
+            bullets(review.get("recommended_changes"))
+
+        section("Technical evidence")
+        bullets(technical.get("observations"), "No technical observations")
+        add("Invalidation conditions", "warning")
+        bullets(technical.get("invalidation_conditions"), "None supplied")
+
+        section("News evidence")
+        bullets(news.get("key_items"), "No key news items")
+        if news.get("bullish_catalysts"):
+            add("Bullish catalysts", "accent")
+            bullets(news.get("bullish_catalysts"))
+        if news.get("bearish_catalysts"):
+            add("Bearish catalysts", "warning")
+            bullets(news.get("bearish_catalysts"))
+        combined_warnings = list(draft.get("warnings") or []) + list(news.get("uncertainties") or []) + list(news.get("data_quality_warnings") or [])
+        if combined_warnings:
+            section("Warnings & uncertainty")
+            bullets(combined_warnings)
+
+        return lines
 
     def draw_logs(self, y: int, x: int, height: int, width: int) -> None:
         self.draw_section_title(y, x, "Logs", width)
@@ -484,7 +613,7 @@ class CryptoTUI:
             ("Global", "1–6 switch view  •  Tab/Shift+Tab cycle  •  ? help  •  q quit"),
             ("Forms", "↑/↓ select  •  Enter edit or run  •  Space toggle switches"),
             ("Articles", "/ search  •  Enter details  •  n/p page  •  r refresh  •  Esc close detail"),
-            ("Analysis result", "PgUp/PgDn scroll  •  o save JSON  •  x clear result"),
+            ("Analysis", "v view last result  •  r quick rerun with current settings  •  Esc return to parameters  •  o save JSON"),
             ("Logs", "↑/↓ scroll  •  Home/End jump  •  c clear"),
             ("Safety", "The analysis workflow is paper-trading by default. This UI does not submit exchange orders."),
         ]
@@ -597,7 +726,7 @@ class CryptoTUI:
             self.refresh_articles()
 
     def handle_analysis_key(self, key: int) -> None:
-        if self.analysis_result:
+        if self.analysis_show_result and self.analysis_result:
             if key == curses.KEY_PPAGE:
                 self.analysis_scroll = max(0, self.analysis_scroll - 10)
                 return
@@ -607,10 +736,21 @@ class CryptoTUI:
             if key in (ord("o"), ord("O")):
                 self.save_analysis_result()
                 return
-            if key in (ord("x"), ord("X")):
-                self.analysis_result = ""
+            if key in (ord("r"), ord("R")):
+                self.launch_analysis()
+                return
+            if key in (27, ord("x"), ord("X")):
+                self.analysis_show_result = False
                 self.analysis_scroll = 0
                 return
+            return
+        if self.analysis_data and key in (ord("v"), ord("V")):
+            self.analysis_show_result = True
+            self.analysis_scroll = 0
+            return
+        if key in (ord("r"), ord("R")):
+            self.launch_analysis()
+            return
         self.handle_form_key(key, self.analysis_fields, "analysis")
 
     def handle_logs_key(self, key: int) -> None:
